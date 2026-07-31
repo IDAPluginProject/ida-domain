@@ -20,7 +20,6 @@ def test_xrefs(test_env):
         assert xref.to_ea == expected_xrefs[i]
         assert xref.type.name == expected_names[i]
 
-
     # Test to() with different XrefsFlags options
     all_xrefs = list(db.xrefs.to_ea(0x2A3))
     assert len(all_xrefs) >= 1
@@ -43,7 +42,6 @@ def test_xrefs(test_env):
 
     from_data = list(db.xrefs.from_ea(0xFF, XrefsFlags.DATA))
     assert isinstance(from_data, list)
-
 
     # Test call references
     calls_to = list(db.xrefs.calls_to_ea(0x2A3))  # add_numbers
@@ -90,7 +88,6 @@ def test_xrefs(test_env):
     data_refs_from = list(db.xrefs.data_refs_from_ea(0xFF))
     assert isinstance(data_refs_from, list)
 
-
     # Test enhanced xref info
     xrefs_info = list(db.xrefs.to_ea(0x2A3))
     assert len(xrefs_info) == 1
@@ -117,6 +114,10 @@ def test_xrefs(test_env):
     assert callers[0].xref_type == XrefType.CALL_NEAR
     assert callers[0].function_ea is None
 
+    private_ea = 0xFF00000000000000
+    assert db.is_private_ea(private_ea)
+    assert isinstance(list(db.xrefs.to_ea(private_ea)), list)
+    assert isinstance(list(db.xrefs.from_ea(private_ea)), list)
 
     invalid_ea = 0xFFFFFFFF
 
@@ -219,6 +220,7 @@ def test_xref_mutation(test_env):
     with pytest.raises(InvalidEAError):
         db.xrefs.remove_data_ref(invalid_ea, 0x330)
 
+
 def test_xref_addition_data_happy_path(test_env):
     db = test_env
 
@@ -236,6 +238,7 @@ def test_xref_addition_data_happy_path(test_env):
 
     assert refs_from_count == len(list(db.xrefs.from_ea(FROM_EA)))
     assert refs_to_count == len(list(db.xrefs.to_ea(TO_EA)))
+
 
 def test_xref_addition_code_happy_path(test_env):
     db = test_env

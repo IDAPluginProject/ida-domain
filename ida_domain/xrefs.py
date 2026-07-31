@@ -169,6 +169,40 @@ class XrefsFlags(IntFlag):
         return ida_flags
 
 
+def _make_xref_info(xb: ida_xref.xrefblk_t) -> XrefInfo:
+    try:
+        xref_type = XrefType(xb.type)
+    except ValueError:
+        xref_type = XrefType.UNKNOWN
+    return XrefInfo(from_ea=xb.frm, to_ea=xb.to, is_code=xb.iscode, type=xref_type, user=xb.user)
+
+
+def _iter_xrefs_to(ea: ea_t, flags: XrefsFlags) -> Iterator[XrefInfo]:
+    """Iterate xrefs to ``ea`` without address validation.
+
+    ``ea`` may also be a type id (privrange address); public entry points
+    are responsible for validating their input.
+    """
+    xb = ida_xref.xrefblk_t()
+    ok = xb.first_to(ea, flags.to_ida_flags())
+    while ok:
+        yield _make_xref_info(xb)
+        ok = xb.next_to()
+
+
+def _iter_xrefs_from(ea: ea_t, flags: XrefsFlags) -> Iterator[XrefInfo]:
+    """Iterate xrefs from ``ea`` without address validation.
+
+    ``ea`` may also be a type id (privrange address); public entry points
+    are responsible for validating their input.
+    """
+    xb = ida_xref.xrefblk_t()
+    ok = xb.first_from(ea, flags.to_ida_flags())
+    while ok:
+        yield _make_xref_info(xb)
+        ok = xb.next_from()
+
+
 @decorate_all_methods(check_db_open)
 class Xrefs(DatabaseEntity):
     """
@@ -216,26 +250,11 @@ class Xrefs(DatabaseEntity):
         if not (self.database.is_valid_ea(ea) or self.database.is_private_ea(ea)):
             raise InvalidEAError(ea)
 
-        xb = ida_xref.xrefblk_t()
-        ida_flags = flags.to_ida_flags()
-
-        ok = xb.first_to(ea, ida_flags)
-        while ok:
-            try:
-                xref_type = XrefType(xb.type)
-            except ValueError:
-                xref_type = XrefType.UNKNOWN
-
-            yield XrefInfo(
-                from_ea=xb.frm, to_ea=xb.to, is_code=xb.iscode, type=xref_type, user=xb.user
-            )
-            ok = xb.next_to()
+        yield from _iter_xrefs_to(ea, flags)
 
     def from_ea(self, ea: ea_t, flags: XrefsFlags = XrefsFlags.ALL) -> Iterator[XrefInfo]:
         """
         Get all cross-references from an address.
-
-        Note: Method named 'from_' because 'from' is a Python keyword.
 
         Args:
             ea: Source effective address
@@ -250,20 +269,7 @@ class Xrefs(DatabaseEntity):
         if not (self.database.is_valid_ea(ea) or self.database.is_private_ea(ea)):
             raise InvalidEAError(ea)
 
-        xb = ida_xref.xrefblk_t()
-        ida_flags = flags.to_ida_flags()
-
-        ok = xb.first_from(ea, ida_flags)
-        while ok:
-            try:
-                xref_type = XrefType(xb.type)
-            except ValueError:
-                xref_type = XrefType.UNKNOWN
-
-            yield XrefInfo(
-                from_ea=xb.frm, to_ea=xb.to, is_code=xb.iscode, type=xref_type, user=xb.user
-            )
-            ok = xb.next_from()
+        yield from _iter_xrefs_from(ea, flags)
 
     def code_refs_to_ea(self, ea: ea_t, flow: bool = True) -> Iterator[ea_t]:
         """
@@ -571,8 +577,7 @@ class Xrefs(DatabaseEntity):
 
         Args:
             from_ea: Source address
-            to_ea: Target address; addresses in IDA's private range are also
-                accepted (e.g. type and member ids)
+            to_ea: Target address
 
         Raises:
             InvalidEAError: If either effective address is invalid
