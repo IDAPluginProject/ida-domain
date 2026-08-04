@@ -7,6 +7,7 @@ import ida_idaapi
 import ida_idp
 import ida_lines
 import ida_ua
+import ida_xref
 from ida_ua import insn_t
 from typing_extensions import TYPE_CHECKING, Iterator, List, Optional
 
@@ -56,6 +57,19 @@ class Instructions(DatabaseEntity):
         """
         return insn and insn.itype != 0
 
+    def has_operand(self, insn: insn_t, index: int) -> bool:
+        """
+        Checks whether operand `index` exists on the given instruction.
+
+        Args:
+            insn: The instruction.
+            index: The operand index.
+
+        Returns:
+            `True` if the index refers to a present (non-void) operand.
+        """
+        return 0 <= index < len(insn.ops) and insn.ops[index].type != ida_ua.o_void
+
     def get_disassembly(self, insn: insn_t, remove_tags: bool = True) -> Optional[str]:
         """
         Retrieves the disassembled string representation of the given instruction.
@@ -94,13 +108,28 @@ class Instructions(DatabaseEntity):
 
     def get_previous(self, ea: ea_t) -> Optional[insn_t]:
         """
-        Decodes previous instruction of the one at specified address.
+        Decodes the instruction that precedes the one at `ea` in execution flow.
+
+        Usually just the previous instruction by address, falling through into
+        `ea`. The special cases:
+
+        - a jump or call from a lower address targets `ea`: that instruction is
+          returned instead, the first one by address when several do. A jump or
+          call from a higher address, like a loop jumping back, doesn't count.
+          Use `db.xrefs.jumps_to_ea` and `db.xrefs.calls_to_ea` to list them all.
+        - nothing falls through into `ea` and no jump or call from a lower
+          address targets it, e.g. the program entry point or code only
+          reached from higher addresses: None.
+
+        Flow is many-to-many, so `get_next` on the result won't always lead
+        back to `ea`. Use `db.heads.get_previous` to walk addresses instead of
+        flow.
 
         Args:
             ea: The effective address of the instruction.
 
         Returns:
-            An insn_t instance, if fails returns None.
+            An insn_t instance, or None when `ea` has no known predecessor.
 
         Raises:
             InvalidEAError: If the effective address is invalid.
@@ -195,14 +224,10 @@ class Instructions(DatabaseEntity):
             An Operand instance of the appropriate type, or None
             if the index is invalid or operand is void.
         """
-        if index < 0 or index >= len(insn.ops):
+        if not self.has_operand(insn, index):
             return None
 
-        op = insn.ops[index]
-        if op.type == ida_ua.o_void:
-            return None
-
-        return OperandFactory.create(self.database, op, insn.ea)
+        return OperandFactory.create(self.database, insn.ops[index], insn.ea)
 
     def get_operands(self, insn: insn_t) -> List[Operand]:
         """
@@ -270,3 +295,148 @@ class Instructions(DatabaseEntity):
         # Get canonical feature flags for the instruction
         feature = insn.get_canon_feature()
         return bool(feature & ida_idp.CF_STOP)
+
+    def text(self, insn: insn_t) -> Optional[str]:
+        """
+        Retrieves the tagged disassembly text of the given instruction.
+
+        Convenience wrapper over `get_disassembly` that keeps IDA
+        color/formatting tags.
+
+        Args:
+            insn: The instruction.
+
+        Returns:
+            The tagged disassembly text, or None if none could be generated.
+        """
+        return self.get_disassembly(insn, remove_tags=False)
+
+    def create(self, ea: ea_t) -> int:
+        """
+        Forces creation of an instruction at the specified address.
+
+        Args:
+            ea: The effective address to convert to an instruction.
+
+        Returns:
+            The length in bytes of the created instruction, or 0 if none was
+            created.
+
+        Raises:
+            InvalidEAError: If the effective address is invalid.
+        """
+        if not self.database.is_valid_ea(ea):
+            raise InvalidEAError(ea)
+        return ida_ua.create_insn(ea)
+
+    def get_next(self, ea: ea_t) -> Optional[insn_t]:
+        """
+        Decodes the instruction that follows the one at `ea` in execution flow.
+
+        Usually just the next instruction by address - nearly everything falls
+        through, calls and conditional jumps included. The special cases:
+
+        - `ea` never falls through, e.g. an unconditional jump, a switch
+          dispatch resolved by analysis, or a call that never returns: its jump
+          or call target is returned, the first one by address when there are
+          several. Use `db.xrefs.jumps_from_ea` and `db.xrefs.calls_from_ea` to
+          list them all.
+        - `ea` breaks execution flow (e.g. return) or no target is known (an
+          unresolved indirect jump): None.
+
+        Flow is many-to-many, so `get_previous` on the result won't always
+        lead back to `ea`. Use `db.heads.get_next` to walk addresses instead
+        of flow.
+
+        Args:
+            ea: The effective address of the instruction.
+
+        Returns:
+            An insn_t instance, or None when `ea` has no known successor.
+
+        Raises:
+            InvalidEAError: If the effective address is invalid.
+        """
+        if not self.database.is_valid_ea(ea):
+            raise InvalidEAError(ea)
+
+        next_ea = ida_xref.get_first_cref_from(ea)
+
+        if self.database.is_valid_ea(next_ea):
+            return self.get_at(next_ea)
+        else:
+            return None
+
+    def has_fall_through(self, insn: insn_t) -> bool:
+        """
+        Checks whether the instruction passes execution to the next one.
+
+        Args:
+            insn: The instruction.
+
+        Returns:
+            True if the instruction can fall through, False otherwise.
+        """
+        return not self.breaks_sequential_flow(insn)
+
+    def is_return(self, insn: insn_t) -> bool:
+        """
+        Checks whether the instruction is a return.
+
+        Args:
+            insn: The instruction.
+
+        Returns:
+            True if the instruction is a return, False otherwise.
+        """
+        return ida_idp.is_ret_insn(insn)
+
+    def is_jump(self, insn: insn_t) -> bool:
+        """
+        Checks whether the instruction is a jump.
+
+        Args:
+            insn: The instruction.
+
+        Returns:
+            True if the instruction is a jump, False otherwise.
+        """
+        if ida_idp.is_indirect_jump_insn(insn):
+            return True
+        return next(self.database.xrefs.jumps_from_ea(insn.ea), None) is not None
+
+    def is_conditional_jump(self, insn: insn_t) -> bool:
+        """
+        Checks whether the instruction is a conditional jump.
+
+        Args:
+            insn: The instruction.
+
+        Returns:
+            True if the instruction is a conditional jump, False otherwise.
+        """
+        return self.is_jump(insn) and self.has_fall_through(insn)
+
+    def call_targets(self, insn: insn_t) -> Iterator[ea_t]:
+        """
+        Retrieves the direct call targets of the instruction.
+
+        Args:
+            insn: The instruction.
+
+        Returns:
+            An iterator over the called addresses.
+        """
+        return self.database.xrefs.calls_from_ea(insn.ea)
+
+    def jump_targets(self, insn: insn_t) -> Iterator[ea_t]:
+        """
+        Retrieves the direct jump targets of the instruction.
+
+        Args:
+            insn: The instruction.
+
+        Returns:
+            An iterator over the jump target addresses.
+        """
+        return self.database.xrefs.jumps_from_ea(insn.ea)
